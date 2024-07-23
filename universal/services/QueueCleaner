@@ -62,6 +62,8 @@ QueueCleanerProcess () {
   arrQueueIdsFailedCount=$(echo -n "$arrQueueFailedIds" | wc -l)
   arrQueueStalledIds=$(echo "$arrQueueData" | jq -r 'select(.status=="stalled") | .id')
   arrQueueIdsStalledount=$(echo -n "$arrQueueStalledIds" | wc -l)
+  arrQueueWarningIds=$(echo "$arrQueueData" | jq -r 'select(.status=="warning") | select(.protocol=="torrent") | .id') #some torrent clients fail to report stalled status correctly
+  arrQueueIdsWarningCount=$(echo -n "$arrQueueWarningIds" | wc -l)
   arrQueuedIds=$(echo "$arrQueueCompletedIds"; echo "$arrQueueFailedIds"; echo "$arrQueueStalledIds")
   arrQueueIdsCount=$(( $arrQueueIdsCompletedCount + $arrQueueIdsFailedCount + $arrQueueIdsStalledount ))
 
@@ -71,9 +73,36 @@ QueueCleanerProcess () {
   #echo "$arrQueueFailedIds"
   #echo "$arrQueueStalledIds"
 
-  if [ $arrQueueIdsCount -eq 0 ]; then
-    log "$arrQueueIdCount items in queue, no items in queue to clean up"
+  if [ $arrQueueIdsWarningCount -eq 0 ]; then
+    log "$arrQueueWarningIds torrents with warnings, skipping hung torrent check"
   else
+  	arrDownloadClientsData="$(curl -s "$arrUrl/api/v3/downloadclient/$arrEpisodeId?apikey=${arrApiKey}")"
+
+    for queueId in $(echo $arrQueueWarningIds); do
+      arrQueueItemData="$(echo "$arrQueueData" | jq -r "select(.id==$queueId)")"
+	    arrQueueItemDownloadClient="$(echo "$arrQueueItemData" | jq -r .downloadClient)"
+      arrDownloadClientData="$(echo "$arrDownloadClientsData" | jq -r 'select(.name=="arrQueueItemDownloadClient") | .fields[]')"
+      arrDownloadClientHost="$(echo "$arrBitTorrentData" | jq -r 'select(.name=="host") | .value')"
+      arrDownloadClientPort="$(echo "$arrBitTorrentData" | jq -r 'select(.name=="port") | .value')"
+      arrDownloadClientUrlBase="$(echo "$arrBitTorrentData" | jq -r 'select(.name=="urlBase") | .value')"
+      arrQueueItemDownloadId="$(echo "$arrQueueItemData" | jq -r .downloadId)"
+      arrQueueItemIndexer="$(echo "$arrQueueItemData" | jq -r .indexer)"
+      torrentSeeds=0
+      torrentTimeElapsed=0
+      torrentSessionDownloaded=0
+      GetTorrentData
+      if [ $torrentSeeds -eq 0 ] && [$torrentTimeElapsed -gt $torrentTimeout] && [ $torrentSessionDownloaded -eq 0 ]; then
+        log "$queueId ($arrQueueItemTitle) :: ERROR :: $torrentSeeds Seeds found for more than $torrentTimeElapsed seconds for torrent reported by $arrQueueItemIndexer to have more than 1 seed. Reccomend lowering priority on this indexer."
+        arrQueuedIds=$(echo "$arrQueuedIds"; echo "$queueId")
+        ((arrQueueIdsCount++)) 
+      fi
+    done
+  fi
+
+  if [ $arrQueueIdsCount -eq 0 ]; then
+    log "$arrQueueIdCount items in queue, no items in queue to clean up."
+  else
+    deleteItems=""
     for queueId in $(echo $arrQueuedIds); do
       arrQueueItemData="$(echo "$arrQueueData" | jq -r "select(.id==$queueId)")"
       arrQueueItemTitle="$(echo "$arrQueueItemData" | jq -r .title)"
@@ -88,9 +117,29 @@ QueueCleanerProcess () {
           continue
         fi
       fi
-      log "$queueId ($arrQueueItemTitle) :: Removing Failed Queue Item from $arrName..."
-      deleteItem=$(curl -sX DELETE "$arrUrl/api/$arrApiVersion/queue/$queueId?removeFromClient=true&blocklist=true&apikey=${arrApiKey}")
+      log "$queueId ($arrQueueItemTitle) :: Failed Queue Item will be removed from $arrName..."
+      #deleteItem=$(curl -sX DELETE "$arrUrl/api/$arrApiVersion/queue/$queueId?removeFromClient=true&blocklist=true&apikey=${arrApiKey}")
+      deleteItems="$deleteItems,$queueId"
     done
+    deleteItems="${deleteItems%,}"
+    if [ -z "$deleteItems" ]; then
+      log "$arrQueueIdsCount items found to remove."
+    else
+      log "$arrQueueIdsCount items found to remove. Removing itemes from $arrName"
+      deleteOutcome=$(curl -sX DELETE "$arrUrl/api/$arrApiVersion/queue/bulk?removeFromClient=true&blocklist=true" -H 'Content-Type: application/json' -H "X-Api-Key: $arrApiKey" --data-raw "{\"ids\":[${deleteItems}]}")
+    fi
+  fi
+}
+
+GetTorrentData()
+{
+  if [ "$arrQueueItemDownloadClient" == "qBittorrent" ]; then
+    authCookieData="$(curl -s -c - --output /dev/null --header 'Referer: $arrUrl' --data 'username=$qBittorrentUsername&password=$qBittorrentPassword' "http://$arrDownloadClientHost:$arrDownloadClientPort$arrDownloadClientUrlBase/api/v2/auth/login")"
+    sid="$(echo "$authCookieData" | awk '{print $NF;}')"
+    torrentData="$(curl -s "http://${arrBitTorrentHost}:${arrBitTorrentPort}${arrBitTorrentUrlBase}/api/v2/torrents/properties?hash=${arrQueueItemDownloadId}" --cookie "SID=${sid}")"
+    torrentSeeds=$(echo "$torrentData" | jq -r .seeds_total)
+    torrentTimeElapsed=$(echo "$torrentData" | jq -r .time_elapsed)
+    torrentSessionDownloaded=$(echo "$torrentData" | jq -r .total_downloaded_session)
   fi
 }
 
