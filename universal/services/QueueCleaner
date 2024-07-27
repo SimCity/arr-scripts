@@ -31,6 +31,12 @@ QueueCleanerProcess () {
   arrQueueData=""
   arrApp=""
 
+  wget -q --spider http://google.com 
+  if [ $? -nq 0 ]; then
+    log "No internet conneciton detected. Not possible to detect stuck items. Skipping"
+    return
+  fi
+
   # Sonarr
   if [ -z "$arrQueueData" ]; then
     arrQueueData="$(curl -s "$arrUrl/api/v3/queue?page=1&pagesize=200&sortDirection=descending&sortKey=progress&includeUnknownSeriesItems=true&apikey=${arrApiKey}" | jq -r .records[])"
@@ -90,6 +96,8 @@ QueueCleanerProcess () {
       torrentSeeds=0
       torrentTimeElapsed=0
       torrentSessionDownloaded=0
+#----> check internet connection here
+      activeInternet=CheckInternet
       GetTorrentData
       if [ $torrentSeeds -eq 0 ] && [$torrentTimeElapsed -gt $torrentTimeout] && [ $torrentSessionDownloaded -eq 0 ]; then
         log "$queueId ($arrQueueItemTitle) :: ERROR :: $torrentSeeds Seeds found for more than $torrentTimeElapsed seconds for torrent reported by $arrQueueItemIndexer to have more than 1 seed. Reccomend lowering priority on this indexer."
